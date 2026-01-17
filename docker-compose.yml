@@ -1,0 +1,10 @@
+services:
+  ts-xl-modifier:
+    build: .
+    container_name: ts-xl-modifier
+    image: technoshed/ts-xl-modifier
+    restart: unless-stopped
+    ports:
+      - "8088:8501" # Map Host 8088 -> Container 8501 (Streamlit Default)
+    volumes:
+      - ./app.py:/app/app.py # Live editing enabled

@@ -1,0 +1,38 @@
+VIN
+    LEN = 17
+    Last 6 characters are numeric
+BRAND
+    Usually called Make or Maker in import files
+    LEN > 0
+    LOOKUP TABLE
+        OPEL    =OPEL
+        CITR    =Citroen
+        PEUG    =Peugeot
+        INO     =INEOS
+        AML     =Aston Martin
+        BML     =Bentley
+        JLR     =Jaguar Landrover
+        FIAT    =FIAT
+        JEEP    =JEEP
+MODEL
+    LEN >0
+    Various Text
+MODELTYPE
+    Same as MODEL
+POA
+    LOOKUP TABLE
+        ZEEB    =Zeebrugge
+        MALM    =Malmo
+        EMD     =Emden
+        SETU    =Setubal
+        GRIM    =Grimsby
+CUSTOMER
+    LOOKUP TABLE
+        AML     =Aston Martin Lagonda
+        BML     =Bentley Motors Ltd
+        STS     =Stellantis
+        HOD     =Hoedlmayr
+        KGR     =KESS Groning
+        LRE     =Neptune JLR
+        INO     =INEOS
+

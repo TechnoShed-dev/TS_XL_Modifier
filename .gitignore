@@ -1,0 +1,14 @@
+# Python junk
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# Mac/Windows junk
+.DS_Store
+Thumbs.db
+
+# Test Data (Don't upload customer data!)
+*.xlsx
+*.xls
+*.csv
