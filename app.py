@@ -8,12 +8,11 @@ Repo:    https://github.com/TechnoShed-dev/TS_XL_Modifier
 Description:
 Streamlit web application for GBA VDAT imports.
 Features:
-- Professional Header with Logo
-- "Dashboard" Style Layout
-- Multi-sheet parsing with Pivot Table detection
-- Automatic Brand/Model cleaning (Prefix removal)
-- Deduplication of VINs
-- "Voyage Ref" input for Excel Sheet Naming
+- "Dashboard" Style UI
+- Multi-sheet Excel/CSV parsing
+- OCR / Camera Input for Paper Manifests (Tesseract)
+- Automatic Brand/Model cleaning
+- Deduplication
 ------------------------------------------------------------------------
 """
 
@@ -23,9 +22,10 @@ from datetime import datetime
 import io
 import re
 import os
+from PIL import Image
+import pytesseract
 
 # --- App Configuration ---
-# You can set the browser tab icon here (I set it to 'favicon' style)
 st.set_page_config(page_title="TS_XL_Modifier", page_icon="⚙️", layout="wide")
 
 st.markdown("""
@@ -38,29 +38,23 @@ st.markdown("""
         text-align: center;
     }
     .big-font { font-size:20px !important; font-weight: bold; }
-    
-    /* Vertical align the title to match the logo better */
-    .css-10trblm { 
-        margin-top: 20px; 
-    }
+    .css-10trblm { margin-top: 20px; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- HEADER SECTION (Logo + Title) ---
-# Create two columns: Narrow one for Logo, Wide one for Title
-col_logo, col_title = st.columns([1, 15]) # 1:15 ratio keeps logo tight to left
+# --- HEADER SECTION ---
+col_logo, col_title = st.columns([1, 15])
 
 with col_logo:
     if os.path.exists("logo.jpg"):
-        st.image("logo.jpg", width=100) # Nice and small
+        st.image("logo.jpg", width=100)
     else:
-        st.write("⚙️") # Fallback if image missing
+        st.write("⚙️")
 
 with col_title:
-    # Removed the Tractor emoji
     st.title("TS_XL_Modifier")
 
-st.caption("Standardized VDAT Import Generator")
+st.caption("Standardized VDAT Import Generator (Digital & OCR)")
 st.markdown("---")
 
 # --- LOOKUP TABLES ---
@@ -102,6 +96,9 @@ BRAND_TO_CODE = {
 def get_vin_status(vin_raw):
     if pd.isna(vin_raw): return False, "Empty/NaN"
     v = str(vin_raw).strip().upper()
+    # Basic cleanup for OCR noise
+    v = re.sub(r'[^A-Z0-9]', '', v) 
+    
     if len(v) != 17: return False, f"Invalid Length ({len(v)})"
     if not v[-6:].isdigit(): return False, f"Suffix Not Numeric ({v[-6:]})"
     return True, "OK"
@@ -165,6 +162,28 @@ def standardize_columns(df):
         if req not in df.columns: df[req] = ""
     return df.loc[:, ~df.columns.duplicated()][["VIN", "BRAND", "MODEL"]]
 
+def extract_vins_from_image(image_file, default_brand, default_model):
+    """
+    Uses Tesseract OCR to read text from image, then Regex to find VINs.
+    """
+    image = Image.open(image_file)
+    # Extract text
+    text = pytesseract.image_to_string(image)
+    
+    # Regex for 17 char alphanumeric (excluding I, O, Q usually, but strict 17 is safer for OCR)
+    # We allow some noise cleaning later
+    potential_vins = re.findall(r'\b[A-HJ-NPR-Z0-9]{17}\b', text)
+    
+    data = []
+    for vin in potential_vins:
+        data.append({
+            "VIN": vin,
+            "BRAND": default_brand,
+            "MODEL": default_model
+        })
+    
+    return pd.DataFrame(data)
+
 # --- UI SECTION ---
 
 c1, c2, c3, c4 = st.columns([1, 1, 1.5, 1])
@@ -181,112 +200,139 @@ with c4:
     st.write("") 
     st.info(f"Ref: **{voyage_ref}**")
 
-uploaded_file = st.file_uploader("Drop Shipping Line File", type=["xlsx", "xls", "csv"])
+# --- TABS ---
+tab1, tab2 = st.tabs(["📂 Excel/CSV Upload", "📷 Camera/OCR Scan"])
 
-download_container = st.container()
-summary_container = st.container()
+final_df = pd.DataFrame()
+ocr_df = pd.DataFrame()
+file_df = pd.DataFrame()
 
-# --- PROCESSING ---
-
-if uploaded_file:
-    try:
-        if uploaded_file.name.lower().endswith('.csv'):
-            try:
-                df_raw = pd.read_csv(uploaded_file, header=None)
-            except:
-                uploaded_file.seek(0)
-                df_raw = pd.read_csv(uploaded_file, sep=';', header=None)
-            sheets = {"Sheet1": df_raw}
-        else:
-            sheets = pd.read_excel(uploaded_file, sheet_name=None, header=None)
-    except Exception as e:
-        st.error(f"❌ Critical Error: {e}")
-        st.stop()
-
-    all_clean_frames = []
-    sheet_summary = [] 
-
-    with st.spinner("Processing Sheets..."):
-        for sheet_name, df in sheets.items():
-            if df.empty: continue
+# =======================
+# TAB 1: FILE UPLOAD
+# =======================
+with tab1:
+    uploaded_file = st.file_uploader("Drop Shipping Line File", type=["xlsx", "xls", "csv"])
+    
+    if uploaded_file:
+        try:
+            if uploaded_file.name.lower().endswith('.csv'):
+                try: df_raw = pd.read_csv(uploaded_file, header=None)
+                except: 
+                    uploaded_file.seek(0)
+                    df_raw = pd.read_csv(uploaded_file, sep=';', header=None)
+                sheets = {"Sheet1": df_raw}
+            else:
+                sheets = pd.read_excel(uploaded_file, sheet_name=None, header=None)
             
+            all_clean_frames = []
+            
+            for sheet_name, df in sheets.items():
+                if df.empty: continue
+                try:
+                    header_idx = find_header_row(df)
+                    if header_idx is None: continue 
+                    new_header = df.iloc[header_idx]
+                    df_data = df.iloc[header_idx + 1:].copy()
+                    df_data.columns = [f"{str(h).strip()}_{i}" for i, h in enumerate(new_header)]
+                    
+                    df_mapped = standardize_columns(df_data)
+                    df_mapped["MODEL"] = df_mapped.apply(clean_model_name, axis=1)
+                    
+                    df_debug = df_mapped.copy()
+                    df_debug["Status"], _ = zip(*df_debug["VIN"].apply(get_vin_status))
+                    df_clean = df_debug[df_debug["Status"] == True].copy()
+                    df_clean = df_clean[df_clean["BRAND"].astype(str).str.strip() != ""]
+                    
+                    if not df_clean.empty:
+                        df_clean["BRAND"] = df_clean["BRAND"].apply(map_brand)
+                        all_clean_frames.append(df_clean)
+                except: continue
+
+            if all_clean_frames:
+                file_df = pd.concat(all_clean_frames, ignore_index=True)
+                st.success(f"✅ Loaded {len(file_df)} vehicles from file.")
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+# =======================
+# TAB 2: OCR SCANNER
+# =======================
+with tab2:
+    st.markdown("### 📸 Scan Paper Manifests")
+    st.info("Use this for KESS/HOD paper load sheets. Tesseract will scan for VINs.")
+    
+    oc1, oc2 = st.columns(2)
+    with oc1:
+        manual_brand = st.selectbox("Default Brand (for OCR)", ["OPEL", "VAUXHALL", "PEUGEOT", "CITROEN", "ASTON MARTIN"])
+    with oc2:
+        manual_model = st.text_input("Default Model (Optional)", value="")
+
+    img_file = st.file_uploader("Upload Scan/Photo", type=["jpg", "png", "jpeg"])
+    camera_file = st.camera_input("Or Take a Picture")
+    
+    target_img = camera_file if camera_file else img_file
+    
+    if target_img:
+        st.image(target_img, caption="Scanning...", width=300)
+        with st.spinner("Running OCR Engine..."):
             try:
-                header_idx = find_header_row(df)
-                if header_idx is None:
-                    sheet_summary.append({"Sheet": sheet_name, "Vehicles": 0, "Status": "⚠️ Ignored (No Header)"})
-                    continue 
-
-                new_header = df.iloc[header_idx]
-                df_data = df.iloc[header_idx + 1:].copy()
-                df_data.columns = [f"{str(h).strip()}_{i}" for i, h in enumerate(new_header)]
-                
-                df_mapped = standardize_columns(df_data)
-                df_mapped["MODEL"] = df_mapped.apply(clean_model_name, axis=1)
-
-                df_debug = df_mapped.copy()
-                df_debug["Status"], _ = zip(*df_debug["VIN"].apply(get_vin_status))
-                
-                df_clean = df_debug[df_debug["Status"] == True].copy()
-                df_clean = df_clean[df_clean["BRAND"].astype(str).str.strip() != ""]
-                
-                count = len(df_clean)
-                
-                if count > 0:
-                    df_clean["BRAND"] = df_clean["BRAND"].apply(map_brand)
-                    all_clean_frames.append(df_clean)
-                    sheet_summary.append({"Sheet": sheet_name, "Vehicles": count, "Status": "✅ OK"})
+                ocr_df = extract_vins_from_image(target_img, manual_brand, manual_model)
+                if not ocr_df.empty:
+                    st.success(f"✅ Found {len(ocr_df)} VINs in image!")
+                    st.dataframe(ocr_df)
                 else:
-                    sheet_summary.append({"Sheet": sheet_name, "Vehicles": 0, "Status": "❌ No valid data"})
-
+                    st.warning("⚠️ No 17-character VINs found. Try better lighting or crop closer.")
             except Exception as e:
-                sheet_summary.append({"Sheet": sheet_name, "Vehicles": 0, "Status": f"🔥 Error: {str(e)}"})
+                st.error(f"OCR Error: {e}")
 
-    if all_clean_frames:
-        final_df = pd.concat(all_clean_frames, ignore_index=True)
-        
-        initial_count = len(final_df)
-        final_df.drop_duplicates(subset=["VIN"], keep="first", inplace=True)
-        final_count = len(final_df)
-        dedup_count = initial_count - final_count
+# =======================
+# MERGE & DOWNLOAD
+# =======================
+st.divider()
 
-        final_df["MODELTYPE"] = final_df["MODEL"]
-        final_df["CUSTOMER"] = customer_code
-        final_df["POA"] = poa_code
-        final_df["DTMASSIGNEDDATE"] = datetime.now().strftime("%d/%m/%Y")
-        
-        cols = ["VIN", "BRAND", "MODEL", "MODELTYPE", "CUSTOMER", "POA", "DTMASSIGNEDDATE"]
-        final_df = final_df[cols]
-        
-        with download_container:
-            output = io.BytesIO()
-            clean_sheet_name = re.sub(r'[\\/*?:\[\]]', '', voyage_ref)[:31]
-            
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                final_df.to_excel(writer, index=False, sheet_name=clean_sheet_name)
-            output.seek(0)
-            
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-            fname = f"VDAT_{customer_code}_{poa_code}_{timestamp}.xlsx"
-            
-            st.success(f"🎉 **Success!** Prepared {len(final_df)} unique vehicles.")
-            st.download_button(
-                label=f"⬇️ DOWNLOAD {fname}",
-                data=output,
-                file_name=fname,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-                use_container_width=True
-            )
+# Combine both sources
+frames_to_merge = []
+if not file_df.empty: frames_to_merge.append(file_df)
+if not ocr_df.empty: frames_to_merge.append(ocr_df)
 
-        with summary_container:
-            st.markdown("### 📊 Processing Summary")
-            st.table(pd.DataFrame(sheet_summary))
-            
-            if dedup_count > 0:
-                st.warning(f"⚠️ Removed {dedup_count} duplicate VINs found across sheets.")
+if frames_to_merge:
+    final_df = pd.concat(frames_to_merge, ignore_index=True)
+    
+    # Deduplicate
+    initial_count = len(final_df)
+    final_df.drop_duplicates(subset=["VIN"], keep="first", inplace=True)
+    dedup_count = initial_count - len(final_df)
 
-    else:
-        with download_container:
-            st.error("❌ No valid vehicle data found in any sheet.")
-        with summary_container:
-             st.table(pd.DataFrame(sheet_summary))
+    # VDAT Columns
+    final_df["MODELTYPE"] = final_df["MODEL"]
+    final_df["CUSTOMER"] = customer_code
+    final_df["POA"] = poa_code
+    final_df["DTMASSIGNEDDATE"] = datetime.now().strftime("%d/%m/%Y")
+    
+    cols = ["VIN", "BRAND", "MODEL", "MODELTYPE", "CUSTOMER", "POA", "DTMASSIGNEDDATE"]
+    final_df = final_df[cols]
+    
+    # Download Logic
+    output = io.BytesIO()
+    clean_sheet_name = re.sub(r'[\\/*?:\[\]]', '', voyage_ref)[:31]
+    
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        final_df.to_excel(writer, index=False, sheet_name=clean_sheet_name)
+    output.seek(0)
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    fname = f"VDAT_{customer_code}_{poa_code}_{timestamp}.xlsx"
+    
+    st.success(f"🎉 **Total Unique Vehicles:** {len(final_df)}")
+    if dedup_count > 0: st.warning(f"Removed {dedup_count} duplicates.")
+    
+    st.download_button(
+        label=f"⬇️ DOWNLOAD {fname}",
+        data=output,
+        file_name=fname,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary",
+        use_container_width=True
+    )
+else:
+    st.info("👆 Upload a file or Scan an image to begin.")
