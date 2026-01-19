@@ -13,7 +13,7 @@ from datetime import datetime
 import io
 import re
 import os
-from PIL import Image, ImageEnhance, ImageChops, ImageOps
+from PIL import Image, ImageEnhance, ImageChops
 import pytesseract
 
 # --- App Configuration ---
@@ -46,7 +46,7 @@ with col_logo:
 with col_title:
     st.title("TS_XL_Modifier")
 
-st.caption("Standardized VDAT Import Generator (Digital & OCR) - Version 2.8.1 (Stable)")
+st.caption("Standardized VDAT Import Generator (Digital, OCR & Email) - Version 2.9")
 st.markdown("---")
 
 # --- LOOKUP TABLES ---
@@ -199,13 +199,11 @@ def extract_vins_from_image(image_file, default_brand, default_model):
     raw_image = Image.open(image_file)
     processed_image = preprocess_image(raw_image)
     
-    # PSM 6: Uniform text block
     text = pytesseract.image_to_string(processed_image, config='--psm 6')
     
     data = []
     lines = text.split('\n')
     
-    # Relaxed Regex
     vin_pattern = re.compile(r'\b([A-Z0-9]{17})\b')
     
     for line in lines:
@@ -213,10 +211,8 @@ def extract_vins_from_image(image_file, default_brand, default_model):
         if vin_match:
             raw_vin = vin_match.group(1)
             
-            # Corrections
             cleaned_vin = raw_vin.replace('O', '0').replace('Q', '0').replace('I', '1')
             
-            # Left-of-VIN Analysis
             pre_vin_text = line[:vin_match.start()].strip()
             clean_text = re.sub(r'[^A-Z0-9\s]', '', pre_vin_text.upper())
             parts = clean_text.split()
@@ -265,11 +261,12 @@ with c4:
     st.info(f"Ref: **{voyage_ref}**")
 
 # --- TABS ---
-tab1, tab2 = st.tabs(["📂 Excel/CSV Upload", "📷 Camera/OCR Scan"])
+tab1, tab2, tab3 = st.tabs(["📂 Excel/CSV Upload", "📷 Camera/OCR Scan", "📋 Clipboard/Email"])
 
 final_df = pd.DataFrame()
 ocr_df = pd.DataFrame()
 file_df = pd.DataFrame()
+paste_df = pd.DataFrame()
 
 # =======================
 # TAB 1: FILE UPLOAD
@@ -333,7 +330,6 @@ with tab2:
 
     img_file = st.file_uploader("Upload Scan/Photo", type=["jpg", "png", "jpeg"])
     
-    # --- SMALL CAMERA EXPANDER ---
     with st.expander("📸 Tap to use Webcam"):
         camera_file = st.camera_input("Take a picture")
     
@@ -355,6 +351,52 @@ with tab2:
                 st.error(f"OCR Error: {e}")
 
 # =======================
+# TAB 3: CLIPBOARD / EMAIL
+# =======================
+with tab3:
+    st.markdown("### 📋 Paste Table from Email/Excel")
+    st.info("Copy the table from Outlook or Excel and paste it here.")
+    
+    raw_text = st.text_area("Paste Data Here", height=200)
+    process_btn = st.button("Process Text")
+    
+    if process_btn and raw_text:
+        try:
+            # Attempt to interpret pasted text (Tab-separated usually)
+            df_paste = pd.read_csv(io.StringIO(raw_text), sep='\t')
+            
+            # If that failed (1 column), try detecting headers manually
+            if len(df_paste.columns) < 2:
+                 # Try comma or semicolon fallback
+                 try: df_paste = pd.read_csv(io.StringIO(raw_text), sep=None, engine='python')
+                 except: pass
+
+            header_idx = find_header_row(df_paste)
+            if header_idx is not None:
+                new_header = df_paste.iloc[header_idx]
+                df_data = df_paste.iloc[header_idx + 1:].copy()
+                df_data.columns = [f"{str(h).strip()}_{i}" for i, h in enumerate(new_header)]
+                
+                df_mapped = standardize_columns(df_data)
+                df_mapped["MODEL"] = df_mapped.apply(clean_model_name, axis=1)
+                
+                df_debug = df_mapped.copy()
+                df_debug["Status"], _ = zip(*df_debug["VIN"].apply(get_vin_status))
+                paste_df = df_debug[df_debug["Status"] == True].copy()
+                
+                if not paste_df.empty:
+                    paste_df["BRAND"] = paste_df["BRAND"].apply(map_brand)
+                    st.success(f"✅ Parsed {len(paste_df)} vehicles from clipboard.")
+                    st.dataframe(paste_df)
+                else:
+                    st.warning("Found table structure, but no valid VINs found.")
+            else:
+                st.error("Could not find a valid header row (VIN, CHASSIS, etc) in pasted text.")
+
+        except Exception as e:
+            st.error(f"Parsing Error: {e}")
+
+# =======================
 # MERGE & DOWNLOAD
 # =======================
 st.divider()
@@ -362,6 +404,7 @@ st.divider()
 frames_to_merge = []
 if not file_df.empty: frames_to_merge.append(file_df)
 if not ocr_df.empty: frames_to_merge.append(ocr_df)
+if not paste_df.empty: frames_to_merge.append(paste_df)
 
 if frames_to_merge:
     final_df = pd.concat(frames_to_merge, ignore_index=True)
@@ -403,4 +446,4 @@ if frames_to_merge:
         use_container_width=True
     )
 else:
-    st.info("👆 Upload a file or Scan an image to begin.")
+    st.info("👆 Upload File / Scan Image / Paste Data to begin.")
