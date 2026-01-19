@@ -4,15 +4,6 @@ Project: TS_XL_Modifier
 Author:  Karl @ TechnoShed
 Website: https://technoshed.co.uk
 Repo:    https://github.com/TechnoShed-dev/TS_XL_Modifier
-
-Description:
-Streamlit web application for GBA VDAT imports.
-Features:
-- "Dashboard" Style UI
-- Multi-sheet Excel/CSV parsing
-- OCR / Camera Input for Paper Manifests (Tesseract)
-- Automatic Brand/Model cleaning
-- Deduplication
 ------------------------------------------------------------------------
 """
 
@@ -22,7 +13,7 @@ from datetime import datetime
 import io
 import re
 import os
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageChops
 import pytesseract
 
 # --- App Configuration ---
@@ -39,6 +30,8 @@ st.markdown("""
     }
     .big-font { font-size:20px !important; font-weight: bold; }
     .css-10trblm { margin-top: 20px; }
+    /* Hide the default camera label to save space */
+    .stCameraInput label { display: none; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -54,7 +47,8 @@ with col_logo:
 with col_title:
     st.title("TS_XL_Modifier")
 
-st.caption("Standardized VDAT Import Generator (Digital & OCR)")
+# ADDED VERSION NUMBER HERE
+st.caption("Standardized VDAT Import Generator (Digital & OCR) - Version 2.7")
 st.markdown("---")
 
 # --- LOOKUP TABLES ---
@@ -78,6 +72,8 @@ POA_MAP = {
 
 BRAND_TO_CODE = {
     "OPEL": "OPEL",
+    "VAUX": "OPEL",      
+    "VAUXHALL": "OPEL",
     "CITROEN": "CITR",
     "CITR": "CITR",
     "PEUGEOT": "PEUG",
@@ -88,15 +84,18 @@ BRAND_TO_CODE = {
     "JAGUAR LANDROVER": "JLR",
     "JLR": "JLR",
     "FIAT": "FIAT",
-    "JEEP": "JEEP"
+    "JEEP": "JEEP",
+    "FORD": "FORD",
+    "TOYOTA": "TOYOTA"
 }
+
+VALID_BRAND_KEYS = set(BRAND_TO_CODE.keys())
 
 # --- HELPER FUNCTIONS ---
 
 def get_vin_status(vin_raw):
     if pd.isna(vin_raw): return False, "Empty/NaN"
     v = str(vin_raw).strip().upper()
-    # Basic cleanup for OCR noise
     v = re.sub(r'[^A-Z0-9]', '', v) 
     
     if len(v) != 17: return False, f"Invalid Length ({len(v)})"
@@ -162,25 +161,85 @@ def standardize_columns(df):
         if req not in df.columns: df[req] = ""
     return df.loc[:, ~df.columns.duplicated()][["VIN", "BRAND", "MODEL"]]
 
-def extract_vins_from_image(image_file, default_brand, default_model):
+def preprocess_image(image):
     """
-    Uses Tesseract OCR to read text from image, then Regex to find VINs.
+    Universal Ink Remover & Enhancer
     """
-    image = Image.open(image_file)
-    # Extract text
-    text = pytesseract.image_to_string(image)
+    if image.mode != 'RGB':
+        image = image.convert('RGB')
     
-    # Regex for 17 char alphanumeric (excluding I, O, Q usually, but strict 17 is safer for OCR)
-    # We allow some noise cleaning later
-    potential_vins = re.findall(r'\b[A-HJ-NPR-Z0-9]{17}\b', text)
+    r, g, b = image.split()
+    
+    # 1. Max Channel (Bleach colored ink to white)
+    max_rb = ImageChops.lighter(r, b)
+    max_rgb = ImageChops.lighter(max_rb, g)
+    img = max_rgb
+    
+    # 2. Upscale (Bicubic is smoother for text structure)
+    width, height = img.size
+    new_size = (int(width * 2), int(height * 2))
+    img = img.resize(new_size, Image.Resampling.BICUBIC)
+    
+    # 3. Contrast Boost
+    enhancer = ImageEnhance.Contrast(img)
+    img = enhancer.enhance(2.0) 
+    
+    # 4. Soft Threshold (140 keeps fainter text, while still killing the bleached ink)
+    # Most black text is < 50. Bleached ink is > 200.
+    img = img.point(lambda x: 0 if x < 140 else 255, '1')
+    
+    return img
+
+def extract_vins_from_image(image_file, default_brand, default_model):
+    raw_image = Image.open(image_file)
+    processed_image = preprocess_image(raw_image)
+    
+    # PSM 6: Assume uniform text block (Forces it to find the line structure)
+    text = pytesseract.image_to_string(processed_image, config='--psm 6')
     
     data = []
-    for vin in potential_vins:
-        data.append({
-            "VIN": vin,
-            "BRAND": default_brand,
-            "MODEL": default_model
-        })
+    lines = text.split('\n')
+    
+    vin_pattern = re.compile(r'\b([A-Z0-9]{17})\b')
+    
+    for line in lines:
+        vin_match = vin_pattern.search(line)
+        if vin_match:
+            raw_vin = vin_match.group(1)
+            
+            # Standard OCR corrections
+            cleaned_vin = raw_vin.replace('O', '0').replace('Q', '0').replace('I', '1')
+            
+            # Extract Text to Left of VIN
+            pre_vin_text = line[:vin_match.start()].strip()
+            clean_text = re.sub(r'[^A-Z0-9\s]', '', pre_vin_text.upper())
+            parts = clean_text.split()
+            
+            extracted_brand = ""
+            extracted_model = ""
+            
+            # Smart Brand Search
+            found_idx = -1
+            for i, part in enumerate(parts):
+                if part in VALID_BRAND_KEYS:
+                    extracted_brand = part
+                    found_idx = i
+                    break
+            
+            if found_idx != -1:
+                extracted_model = " ".join(parts[found_idx+1:])
+            else:
+                extracted_brand = default_brand
+                extracted_model = default_model
+
+            if not extracted_model.strip():
+                extracted_model = default_model
+
+            data.append({
+                "VIN": cleaned_vin,
+                "BRAND": extracted_brand,
+                "MODEL": extracted_model
+            })
     
     return pd.DataFrame(data)
 
@@ -259,29 +318,34 @@ with tab1:
 # =======================
 with tab2:
     st.markdown("### 📸 Scan Paper Manifests")
-    st.info("Use this for KESS/HOD paper load sheets. Tesseract will scan for VINs.")
+    st.info("Universal Mode: Filters out pen marks automatically.")
     
     oc1, oc2 = st.columns(2)
     with oc1:
-        manual_brand = st.selectbox("Default Brand (for OCR)", ["OPEL", "VAUXHALL", "PEUGEOT", "CITROEN", "ASTON MARTIN"])
+        manual_brand = st.text_input("Fallback Brand", value="OPEL")
     with oc2:
-        manual_model = st.text_input("Default Model (Optional)", value="")
+        manual_model = st.text_input("Fallback Model", value="COMBO")
 
     img_file = st.file_uploader("Upload Scan/Photo", type=["jpg", "png", "jpeg"])
-    camera_file = st.camera_input("Or Take a Picture")
+    
+    # --- SMALL CAMERA EXPANDER ---
+    with st.expander("📸 Tap to use Webcam"):
+        camera_file = st.camera_input("Take a picture")
     
     target_img = camera_file if camera_file else img_file
     
     if target_img:
-        st.image(target_img, caption="Scanning...", width=300)
-        with st.spinner("Running OCR Engine..."):
+        st.image(target_img, width=200, caption="Processing...")
+        with st.spinner("Processing (Universal Ink Filter + Smart Threshold)..."):
             try:
                 ocr_df = extract_vins_from_image(target_img, manual_brand, manual_model)
+                
                 if not ocr_df.empty:
-                    st.success(f"✅ Found {len(ocr_df)} VINs in image!")
+                    ocr_df["BRAND"] = ocr_df["BRAND"].apply(map_brand)
+                    st.success(f"✅ Found {len(ocr_df)} Vehicles!")
                     st.dataframe(ocr_df)
                 else:
-                    st.warning("⚠️ No 17-character VINs found. Try better lighting or crop closer.")
+                    st.warning("⚠️ No 17-character VINs found. Try cropping closer.")
             except Exception as e:
                 st.error(f"OCR Error: {e}")
 
@@ -290,7 +354,6 @@ with tab2:
 # =======================
 st.divider()
 
-# Combine both sources
 frames_to_merge = []
 if not file_df.empty: frames_to_merge.append(file_df)
 if not ocr_df.empty: frames_to_merge.append(ocr_df)
