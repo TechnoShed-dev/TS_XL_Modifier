@@ -13,7 +13,7 @@ from datetime import datetime
 import io
 import re
 import os
-from PIL import Image, ImageEnhance, ImageChops
+from PIL import Image, ImageEnhance, ImageChops, ImageOps
 import pytesseract
 
 # --- App Configuration ---
@@ -30,7 +30,6 @@ st.markdown("""
     }
     .big-font { font-size:20px !important; font-weight: bold; }
     .css-10trblm { margin-top: 20px; }
-    /* Hide the default camera label to save space */
     .stCameraInput label { display: none; }
 </style>
 """, unsafe_allow_html=True)
@@ -47,8 +46,7 @@ with col_logo:
 with col_title:
     st.title("TS_XL_Modifier")
 
-# ADDED VERSION NUMBER HERE
-st.caption("Standardized VDAT Import Generator (Digital & OCR) - Version 2.7")
+st.caption("Standardized VDAT Import Generator (Digital & OCR) - Version 2.8.1 (Stable)")
 st.markdown("---")
 
 # --- LOOKUP TABLES ---
@@ -161,9 +159,14 @@ def standardize_columns(df):
         if req not in df.columns: df[req] = ""
     return df.loc[:, ~df.columns.duplicated()][["VIN", "BRAND", "MODEL"]]
 
+def apply_gamma_darkening(img, gamma=0.5):
+    inv_gamma = 1.0 / gamma
+    table = [((i / 255.0) ** inv_gamma) * 255 for i in range(256)]
+    return img.point(table)
+
 def preprocess_image(image):
     """
-    Universal Ink Remover & Enhancer
+    Universal Ink Remover + Faded Text Enhancer (Gamma Corrected)
     """
     if image.mode != 'RGB':
         image = image.convert('RGB')
@@ -175,18 +178,20 @@ def preprocess_image(image):
     max_rgb = ImageChops.lighter(max_rb, g)
     img = max_rgb
     
-    # 2. Upscale (Bicubic is smoother for text structure)
+    # 2. Upscale
     width, height = img.size
     new_size = (int(width * 2), int(height * 2))
     img = img.resize(new_size, Image.Resampling.BICUBIC)
     
-    # 3. Contrast Boost
+    # 3. Gamma Correction (Darken faint mid-tones)
+    img = apply_gamma_darkening(img, gamma=0.5)
+
+    # 4. Contrast Boost
     enhancer = ImageEnhance.Contrast(img)
-    img = enhancer.enhance(2.0) 
+    img = enhancer.enhance(2.5) 
     
-    # 4. Soft Threshold (140 keeps fainter text, while still killing the bleached ink)
-    # Most black text is < 50. Bleached ink is > 200.
-    img = img.point(lambda x: 0 if x < 140 else 255, '1')
+    # 5. Hard Threshold
+    img = img.point(lambda x: 0 if x < 180 else 255, '1')
     
     return img
 
@@ -194,12 +199,13 @@ def extract_vins_from_image(image_file, default_brand, default_model):
     raw_image = Image.open(image_file)
     processed_image = preprocess_image(raw_image)
     
-    # PSM 6: Assume uniform text block (Forces it to find the line structure)
+    # PSM 6: Uniform text block
     text = pytesseract.image_to_string(processed_image, config='--psm 6')
     
     data = []
     lines = text.split('\n')
     
+    # Relaxed Regex
     vin_pattern = re.compile(r'\b([A-Z0-9]{17})\b')
     
     for line in lines:
@@ -207,10 +213,10 @@ def extract_vins_from_image(image_file, default_brand, default_model):
         if vin_match:
             raw_vin = vin_match.group(1)
             
-            # Standard OCR corrections
+            # Corrections
             cleaned_vin = raw_vin.replace('O', '0').replace('Q', '0').replace('I', '1')
             
-            # Extract Text to Left of VIN
+            # Left-of-VIN Analysis
             pre_vin_text = line[:vin_match.start()].strip()
             clean_text = re.sub(r'[^A-Z0-9\s]', '', pre_vin_text.upper())
             parts = clean_text.split()
@@ -218,7 +224,6 @@ def extract_vins_from_image(image_file, default_brand, default_model):
             extracted_brand = ""
             extracted_model = ""
             
-            # Smart Brand Search
             found_idx = -1
             for i, part in enumerate(parts):
                 if part in VALID_BRAND_KEYS:
@@ -318,7 +323,7 @@ with tab1:
 # =======================
 with tab2:
     st.markdown("### 📸 Scan Paper Manifests")
-    st.info("Universal Mode: Filters out pen marks automatically.")
+    st.info("Universal Mode: Filters pen marks & enhances faded text.")
     
     oc1, oc2 = st.columns(2)
     with oc1:
@@ -336,7 +341,7 @@ with tab2:
     
     if target_img:
         st.image(target_img, width=200, caption="Processing...")
-        with st.spinner("Processing (Universal Ink Filter + Smart Threshold)..."):
+        with st.spinner("Processing (Universal Ink Filter + Gamma Correction)..."):
             try:
                 ocr_df = extract_vins_from_image(target_img, manual_brand, manual_model)
                 
