@@ -46,7 +46,7 @@ with col_logo:
 with col_title:
     st.title("TS_XL_Modifier")
 
-st.caption("Standardized VDAT Import Generator (Digital, OCR & Email) - Version 2.9")
+st.caption("Standardized VDAT Import Generator (Digital, OCR & Email) - Version 2.10")
 st.markdown("---")
 
 # --- LOOKUP TABLES ---
@@ -244,6 +244,59 @@ def extract_vins_from_image(image_file, default_brand, default_model):
     
     return pd.DataFrame(data)
 
+def parse_pasted_text(raw_text, default_brand, default_model):
+    """
+    Intelligently parses unstructured email text.
+    Pattern: [VIN] - [Model] - [Dest]
+    """
+    data = []
+    lines = raw_text.split('\n')
+    
+    # Strict VIN regex (17 chars)
+    vin_pattern = re.compile(r'\b([A-HJ-NPR-Z0-9]{17})\b')
+    
+    for line in lines:
+        line = line.strip()
+        if not line: continue
+        
+        vin_match = vin_pattern.search(line)
+        if vin_match:
+            vin = vin_match.group(1)
+            
+            # --- MODEL EXTRACTION ---
+            # Strategy: Look for text between hyphens
+            # Example: SCFULCEV6TGJ60976 - Vanquish Coupe - Stoneacre
+            
+            # Split line by hyphens
+            parts = [p.strip() for p in line.split('-') if p.strip()]
+            
+            extracted_model = default_model
+            
+            # If line splits into 3+ parts (VIN - Model - Dest), usually Model is index 1
+            # Note: The VIN itself might be part of index 0 or index 0 might just be the VIN
+            
+            # Let's clean the parts to remove the VIN from them if it got caught
+            clean_parts = []
+            for p in parts:
+                if vin not in p: # exclude the part that contains the VIN
+                    clean_parts.append(p)
+                else:
+                    # If VIN is inside a string like "SCFUL... -", remove the VIN and check if anything remains
+                    remnant = p.replace(vin, "").strip()
+                    if remnant: clean_parts.append(remnant)
+            
+            if clean_parts:
+                # The first non-VIN part is usually the Model
+                extracted_model = clean_parts[0]
+            
+            data.append({
+                "VIN": vin,
+                "BRAND": default_brand, # Email rarely lists brand for AML
+                "MODEL": extracted_model
+            })
+            
+    return pd.DataFrame(data)
+
 # --- UI SECTION ---
 
 c1, c2, c3, c4 = st.columns([1, 1, 1.5, 1])
@@ -324,9 +377,9 @@ with tab2:
     
     oc1, oc2 = st.columns(2)
     with oc1:
-        manual_brand = st.text_input("Fallback Brand", value="OPEL")
+        manual_brand = st.text_input("Fallback Brand (OCR)", value="OPEL")
     with oc2:
-        manual_model = st.text_input("Fallback Model", value="COMBO")
+        manual_model = st.text_input("Fallback Model (OCR)", value="COMBO")
 
     img_file = st.file_uploader("Upload Scan/Photo", type=["jpg", "png", "jpeg"])
     
@@ -354,47 +407,57 @@ with tab2:
 # TAB 3: CLIPBOARD / EMAIL
 # =======================
 with tab3:
-    st.markdown("### 📋 Paste Table from Email/Excel")
-    st.info("Copy the table from Outlook or Excel and paste it here.")
+    st.markdown("### 📋 Paste Table / Email Text")
+    st.info("Paste headers and data from Excel, OR raw email text.")
     
+    p1, p2 = st.columns(2)
+    with p1:
+        paste_brand = st.text_input("Default Brand (Paste)", value="ASTON MARTIN")
+    with p2:
+        paste_model = st.text_input("Default Model (Paste)", value="")
+        
     raw_text = st.text_area("Paste Data Here", height=200)
     process_btn = st.button("Process Text")
     
     if process_btn and raw_text:
+        # Strategy 1: Try Structured Parse (TSV/CSV with headers)
         try:
-            # Attempt to interpret pasted text (Tab-separated usually)
             df_paste = pd.read_csv(io.StringIO(raw_text), sep='\t')
-            
-            # If that failed (1 column), try detecting headers manually
-            if len(df_paste.columns) < 2:
-                 # Try comma or semicolon fallback
-                 try: df_paste = pd.read_csv(io.StringIO(raw_text), sep=None, engine='python')
-                 except: pass
+            # Check if this successfully parsed meaningful columns (>=2 columns)
+            if len(df_paste.columns) >= 2:
+                 header_idx = find_header_row(df_paste)
+                 if header_idx is not None:
+                    # Logic for Structured Data (Like Tab 1)
+                    new_header = df_paste.iloc[header_idx]
+                    df_data = df_paste.iloc[header_idx + 1:].copy()
+                    df_data.columns = [f"{str(h).strip()}_{i}" for i, h in enumerate(new_header)]
+                    
+                    df_mapped = standardize_columns(df_data)
+                    df_mapped["MODEL"] = df_mapped.apply(clean_model_name, axis=1)
+                    
+                    df_debug = df_mapped.copy()
+                    df_debug["Status"], _ = zip(*df_debug["VIN"].apply(get_vin_status))
+                    paste_df = df_debug[df_debug["Status"] == True].copy()
+                    if not paste_df.empty:
+                        paste_df["BRAND"] = paste_df["BRAND"].apply(map_brand)
+                        st.success(f"✅ Parsed {len(paste_df)} vehicles (Structured Table).")
+        except: pass
 
-            header_idx = find_header_row(df_paste)
-            if header_idx is not None:
-                new_header = df_paste.iloc[header_idx]
-                df_data = df_paste.iloc[header_idx + 1:].copy()
-                df_data.columns = [f"{str(h).strip()}_{i}" for i, h in enumerate(new_header)]
-                
-                df_mapped = standardize_columns(df_data)
-                df_mapped["MODEL"] = df_mapped.apply(clean_model_name, axis=1)
-                
-                df_debug = df_mapped.copy()
-                df_debug["Status"], _ = zip(*df_debug["VIN"].apply(get_vin_status))
-                paste_df = df_debug[df_debug["Status"] == True].copy()
-                
+        # Strategy 2: If Strategy 1 failed (df empty), try Unstructured Email Parse
+        if paste_df.empty:
+            try:
+                paste_df = parse_pasted_text(raw_text, paste_brand, paste_model)
                 if not paste_df.empty:
                     paste_df["BRAND"] = paste_df["BRAND"].apply(map_brand)
-                    st.success(f"✅ Parsed {len(paste_df)} vehicles from clipboard.")
-                    st.dataframe(paste_df)
+                    st.success(f"✅ Parsed {len(paste_df)} vehicles (Unstructured Text).")
                 else:
-                    st.warning("Found table structure, but no valid VINs found.")
-            else:
-                st.error("Could not find a valid header row (VIN, CHASSIS, etc) in pasted text.")
+                     st.warning("Could not find any VINs in the pasted text.")
+            except Exception as e:
+                st.error(f"Text Parse Error: {e}")
+        
+        if not paste_df.empty:
+            st.dataframe(paste_df)
 
-        except Exception as e:
-            st.error(f"Parsing Error: {e}")
 
 # =======================
 # MERGE & DOWNLOAD
