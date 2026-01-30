@@ -46,7 +46,7 @@ with col_logo:
 with col_title:
     st.title("TS_XL_Modifier")
 
-st.caption("Standardized VDAT Import Generator (Digital, OCR & Email) - Version 2.10")
+st.caption("Standardized VDAT Import Generator (Digital, OCR & Email) - Version 2.11")
 st.markdown("---")
 
 # --- LOOKUP TABLES ---
@@ -252,7 +252,6 @@ def parse_pasted_text(raw_text, default_brand, default_model):
     data = []
     lines = raw_text.split('\n')
     
-    # Strict VIN regex (17 chars)
     vin_pattern = re.compile(r'\b([A-HJ-NPR-Z0-9]{17})\b')
     
     for line in lines:
@@ -263,35 +262,37 @@ def parse_pasted_text(raw_text, default_brand, default_model):
         if vin_match:
             vin = vin_match.group(1)
             
-            # --- MODEL EXTRACTION ---
-            # Strategy: Look for text between hyphens
-            # Example: SCFULCEV6TGJ60976 - Vanquish Coupe - Stoneacre
-            
             # Split line by hyphens
             parts = [p.strip() for p in line.split('-') if p.strip()]
             
             extracted_model = default_model
             
-            # If line splits into 3+ parts (VIN - Model - Dest), usually Model is index 1
-            # Note: The VIN itself might be part of index 0 or index 0 might just be the VIN
-            
-            # Let's clean the parts to remove the VIN from them if it got caught
             clean_parts = []
             for p in parts:
-                if vin not in p: # exclude the part that contains the VIN
-                    clean_parts.append(p)
-                else:
-                    # If VIN is inside a string like "SCFUL... -", remove the VIN and check if anything remains
+                # 1. Filter out the VIN itself
+                if vin in p: 
+                    # If VIN is part of a larger string, strip it out
                     remnant = p.replace(vin, "").strip()
                     if remnant: clean_parts.append(remnant)
+                else:
+                    # 2. Filter out the BRAND (e.g. "Aston Martin") if it matches the Default Brand
+                    # Check if the part roughly matches the Default Brand setting
+                    if default_brand and default_brand.upper() in p.upper():
+                        continue
+                    
+                    # Also explicit check for "ASTON MARTIN" if user only typed "AML"
+                    if "ASTON MARTIN" in p.upper():
+                        continue
+                        
+                    clean_parts.append(p)
             
             if clean_parts:
-                # The first non-VIN part is usually the Model
+                # The first valid part remaining is likely the Model
                 extracted_model = clean_parts[0]
             
             data.append({
                 "VIN": vin,
-                "BRAND": default_brand, # Email rarely lists brand for AML
+                "BRAND": default_brand,
                 "MODEL": extracted_model
             })
             
@@ -312,6 +313,21 @@ with c3:
 with c4:
     st.write("") 
     st.info(f"Ref: **{voyage_ref}**")
+
+with st.sidebar:
+    with st.expander("❓ How to use"):
+        st.markdown("""
+        **1. Excel Files:**
+        Drag & drop into Tab 1.
+        
+        **2. Paper/Camera:**
+        Use Tab 2. System ignores pen marks.
+        
+        **3. Email/Text:**
+        Copy email body, paste into Tab 3.
+        
+        **Support:** Contact Karl.
+        """)
 
 # --- TABS ---
 tab1, tab2, tab3 = st.tabs(["📂 Excel/CSV Upload", "📷 Camera/OCR Scan", "📋 Clipboard/Email"])
@@ -423,11 +439,9 @@ with tab3:
         # Strategy 1: Try Structured Parse (TSV/CSV with headers)
         try:
             df_paste = pd.read_csv(io.StringIO(raw_text), sep='\t')
-            # Check if this successfully parsed meaningful columns (>=2 columns)
             if len(df_paste.columns) >= 2:
                  header_idx = find_header_row(df_paste)
                  if header_idx is not None:
-                    # Logic for Structured Data (Like Tab 1)
                     new_header = df_paste.iloc[header_idx]
                     df_data = df_paste.iloc[header_idx + 1:].copy()
                     df_data.columns = [f"{str(h).strip()}_{i}" for i, h in enumerate(new_header)]
@@ -443,7 +457,7 @@ with tab3:
                         st.success(f"✅ Parsed {len(paste_df)} vehicles (Structured Table).")
         except: pass
 
-        # Strategy 2: If Strategy 1 failed (df empty), try Unstructured Email Parse
+        # Strategy 2: If Strategy 1 failed, try Unstructured Email Parse
         if paste_df.empty:
             try:
                 paste_df = parse_pasted_text(raw_text, paste_brand, paste_model)
