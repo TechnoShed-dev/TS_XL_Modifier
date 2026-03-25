@@ -1,7 +1,6 @@
 # TS_XL_Modifier (TechnoShed)
 
 **Version:** 2.10
-**Live App:** [http://gba.technoshed.co.uk](http://gba.technoshed.co.uk)
 
 A specialized Data Transformation Tool for GBA Group VDAT Imports.
 
